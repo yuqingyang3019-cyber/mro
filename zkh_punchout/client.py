@@ -337,3 +337,37 @@ class ZKHClient:
         self.ensure_token()
         payload = {"opt": opt, "uniqueNo": unique_no, **kwargs}
         return self._request("/user/sync", payload)
+
+    def ensure_user(self, unique_no: str, nick_name: str = "",
+                    email: str = "", mobile: str = "",
+                    role_name: str = "采购员") -> bool:
+        """
+        确保用户存在于震坤行：先查询，不存在则自动创建
+        :param unique_no: 客户侧用户唯一标识
+        :param nick_name: 姓名
+        :param email: 邮箱
+        :param mobile: 手机号
+        :param role_name: 角色（采购员/需求员/采购经理/集团管理员）
+        :return: 是否成功
+        """
+        self.ensure_token()
+
+        # 查询用户是否存在
+        result = self.user_sync("query", unique_no)
+        if result and result.get("success"):
+            user_data = result.get("result", {})
+            if user_data and user_data.get("uniqueNo"):
+                logger.info(f"User exists: {unique_no}")
+                return True
+
+        # 不存在则创建
+        logger.info(f"User not found, creating: {unique_no}")
+        create_result = self.user_sync(
+            "insert", unique_no,
+            nickName=nick_name or unique_no,
+            email=email,
+            mobile=mobile,
+            roleName=role_name,
+            stateCode=1,
+        )
+        return create_result is not None and create_result.get("success", False)

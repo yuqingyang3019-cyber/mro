@@ -49,10 +49,47 @@ store = OrderApprovalStore()
 
 SSO_FORM_TEMPLATE = """
 <!DOCTYPE html>
-<html>
-<head><meta charset="utf-8"><title>跳转震坤行</title></head>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>震坤行采购平台</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: #f5f6fa;
+    display: flex; justify-content: center; align-items: center;
+    min-height: 100vh;
+  }
+  .container {
+    text-align: center;
+    padding: 48px 32px;
+  }
+  .logo {
+    font-size: 28px; font-weight: 700; color: #1a1a2e;
+    margin-bottom: 8px;
+  }
+  .spinner {
+    width: 40px; height: 40px;
+    margin: 32px auto 20px;
+    border: 3px solid #e0e0e0;
+    border-top-color: #2563eb;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .message {
+    color: #666; font-size: 15px;
+  }
+</style>
+</head>
 <body>
-  <p>正在跳转到震坤行采购平台...</p>
+  <div class="container">
+    <div class="logo">震坤行采购平台</div>
+    <div class="spinner"></div>
+    <p class="message">正在进入震坤行，请稍候...</p>
+  </div>
   <form id="zkhForm" action="{{ checkin_url }}" method="post" enctype="multipart/form-data">
     {% for key, value in form.items() %}
     <input type="hidden" name="{{ key }}" value="{{ value }}">
@@ -68,15 +105,21 @@ SSO_FORM_TEMPLATE = """
 def sso_login():
     """
     SSO 登录入口
-    用户访问此接口，自动获取 strustNo 并构建表单跳转到震坤行
+    用户访问此接口，自动同步用户 → 获取 strustNo → 跳转震坤行
 
     参数：
         unique_no: 客户侧用户唯一标识（必填）
         pin: 震坤行用户名（可选）
+        nick_name: 用户姓名（可选，用于自动创建用户）
+        mobile: 手机号（可选）
+        email: 邮箱（可选）
         custom_fields: 自定义参数 JSON（可选，如发票抬头）
     """
     unique_no = request.args.get("unique_no", "")
     pin = request.args.get("pin", "")
+    nick_name = request.args.get("nick_name", "")
+    mobile = request.args.get("mobile", "")
+    email = request.args.get("email", "")
     custom_fields_str = request.args.get("custom_fields", "")
 
     if not unique_no:
@@ -88,6 +131,11 @@ def sso_login():
             custom_fields = json.loads(custom_fields_str)
         except json.JSONDecodeError:
             return jsonify({"error": "custom_fields must be valid JSON"}), 400
+
+    # 自动同步用户：查询 → 不存在则创建
+    if not client.ensure_user(unique_no, nick_name, email, mobile):
+        logger.warning(f"Failed to ensure user: {unique_no}")
+        # 不阻断流程，继续尝试 SSO（用户可能已存在）
 
     # hookUrl 是震坤行回传订单的地址
     hook_url = f"{SELF_BASE_URL}/api/zkh/checkout"
