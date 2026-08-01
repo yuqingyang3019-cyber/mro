@@ -1,0 +1,27 @@
+services:
+  mro-api:
+    image: ${API_IMAGE:-mro-api:local}
+    build:
+      context: .
+      target: backend
+    restart: unless-stopped
+    env_file: .env
+    networks:
+      - edge
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "from urllib.request import urlopen; assert urlopen('http://127.0.0.1:5000/health').status == 200",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    mem_limit: 256m
+
+networks:
+  edge:
+    external: true
+    name: water-healer-edge

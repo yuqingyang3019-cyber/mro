@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.env
+*.zip
+dist/
+.venv/
+*.egg-info/*.pdf
+*.pptx
