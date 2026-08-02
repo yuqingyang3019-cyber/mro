@@ -41,6 +41,7 @@ DINGTALK_CONFIG = {
     "app_key": os.getenv("DINGTALK_APP_KEY", "ding1fqbfzewirie5zw8"),
     "app_secret": os.getenv("DINGTALK_APP_SECRET", "xHdkAO5DRED_lUobIDkFYHSwznaMOTe8do6kfdYbXjVapcd3swuffU2rHVi4srM3"),
     "app_id": os.getenv("DINGTALK_APP_ID", "3fd243f6-33a1-4dd2-b681-aabe7eb1fd5d"),
+    "corp_id": os.getenv("DINGTALK_CORP_ID", "ding4f4b796d63d5f483f5bf40eda33b7ba0"),
 }
 
 # ==================== 初始化 ====================
@@ -283,7 +284,7 @@ def dingtalk_sso():
     return render_template_string(
         DINGTALK_SSO_TEMPLATE,
         auth_url=f"{SELF_BASE_URL}/api/dingtalk/auth",
-        corp_id=dingtalk.app_key if dingtalk.app_key.startswith("ding") else "",
+        corp_id=DINGTALK_CONFIG["corp_id"],
     )
 
 
