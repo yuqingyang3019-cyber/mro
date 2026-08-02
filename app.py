@@ -23,6 +23,7 @@ from flask import Flask, request, jsonify, render_template_string
 
 from zkh_punchout.client import ZKHClient
 from zkh_punchout.order import OrderData, OrderApprovalStore, ApprovalStatus
+from zkh_punchout.dingtalk import DingTalkClient
 
 # ==================== 配置 ====================
 
@@ -36,6 +37,12 @@ ZKH_CONFIG = {
 
 SELF_BASE_URL = os.getenv("SELF_BASE_URL", "https://mro.water-healer.com")
 
+DINGTALK_CONFIG = {
+    "app_key": os.getenv("DINGTALK_APP_KEY", "ding1fqbfzewirie5zw8"),
+    "app_secret": os.getenv("DINGTALK_APP_SECRET", "xHdkAO5DRED_lUobIDkFYHSwznaMOTe8do6kfdYbXjVapcd3swuffU2rHVi4srM3"),
+    "app_id": os.getenv("DINGTALK_APP_ID", "3fd243f6-33a1-4dd2-b681-aabe7eb1fd5d"),
+}
+
 # ==================== 初始化 ====================
 
 app = Flask(__name__)
@@ -44,6 +51,7 @@ logger = logging.getLogger(__name__)
 
 client = ZKHClient(**ZKH_CONFIG)
 store = OrderApprovalStore()
+dingtalk = DingTalkClient(DINGTALK_CONFIG["app_key"], DINGTALK_CONFIG["app_secret"])
 
 # ==================== SSO 登录 ====================
 
@@ -149,6 +157,184 @@ def sso_login():
         checkin_url=result["checkin_url"],
         form=result["checkin_form"],
     )
+
+
+# ==================== 钉钉 H5 免登 SSO ====================
+
+DINGTALK_SSO_TEMPLATE = """
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>震坤行采购平台</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: #f5f6fa;
+    display: flex; justify-content: center; align-items: center;
+    min-height: 100vh; text-align: center;
+  }
+  .container { padding: 48px 24px; }
+  .logo { font-size: 24px; font-weight: 700; color: #1a1a2e; margin-bottom: 8px; }
+  .spinner {
+    width: 36px; height: 36px; margin: 28px auto 16px;
+    border: 3px solid #e0e0e0; border-top-color: #2563eb;
+    border-radius: 50%; animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .message { color: #666; font-size: 14px; }
+  .error { color: #e53e3e; font-size: 13px; margin-top: 12px; display: none; }
+</style>
+</head>
+<body>
+  <div class="container">
+    <div class="logo">震坤行采购平台</div>
+    <div class="spinner" id="spinner"></div>
+    <p class="message" id="message">正在获取钉钉授权...</p>
+    <p class="error" id="error"></p>
+  </div>
+  <form id="zkhForm" action="" method="post" enctype="multipart/form-data"></form>
+
+  <script src="https://g.alicdn.com/dingding/dingtalk-jsapi/3.1.0/dingtalk.open.js"></script>
+  <script>
+    var AUTH_URL = "{{ auth_url }}";
+    var CORP_ID = "{{ corp_id }}";
+
+    function showError(msg) {
+      document.getElementById('spinner').style.display = 'none';
+      document.getElementById('message').textContent = msg;
+      document.getElementById('message').style.color = '#e53e3e';
+    }
+
+    function showMessage(msg) {
+      document.getElementById('message').textContent = msg;
+    }
+
+    function submitZKH(formData) {
+      var form = document.getElementById('zkhForm');
+      form.action = formData.checkin_url;
+      for (var key in formData.form) {
+        var input = document.createElement('input');
+        input.type = 'hidden';
+        input.name = key;
+        input.value = formData.form[key];
+        form.appendChild(input);
+      }
+      showMessage('正在进入震坤行，请稍候...');
+      form.submit();
+    }
+
+    function doAuth() {
+      showMessage('正在获取钉钉授权...');
+      dd.ready(function () {
+        dd.runtime.permission.requestAuthCode({
+          corpId: CORP_ID,
+          onSuccess: function (result) {
+            showMessage('正在验证身份...');
+            var xhr = new XMLHttpRequest();
+            xhr.open('POST', AUTH_URL, true);
+            xhr.setRequestHeader('Content-Type', 'application/json');
+            xhr.onload = function () {
+              if (xhr.status === 200) {
+                try {
+                  var resp = JSON.parse(xhr.responseText);
+                  if (resp.success && resp.checkin_form) {
+                    submitZKH(resp);
+                  } else {
+                    showError(resp.error || 'SSO 登录失败');
+                  }
+                } catch (e) {
+                  showError('数据解析失败');
+                }
+              } else {
+                showError('服务异常，请稍后重试');
+              }
+            };
+            xhr.onerror = function () {
+              showError('网络异常，请检查连接');
+            };
+            xhr.send(JSON.stringify({ code: result.code }));
+          },
+          onFail: function (err) {
+            showError('钉钉授权失败: ' + JSON.stringify(err));
+          }
+        });
+      });
+    }
+
+    dd.error(function (err) {
+      showError('钉钉初始化失败: ' + JSON.stringify(err));
+    });
+    doAuth();
+  </script>
+</body>
+</html>
+"""
+
+
+@app.route("/dingtalk/sso")
+def dingtalk_sso():
+    """
+    钉钉 H5 微应用入口
+    用户在钉钉中打开此页面 → 自动免登 → 获取用户信息 → SSO 到震坤行
+    """
+    return render_template_string(
+        DINGTALK_SSO_TEMPLATE,
+        auth_url=f"{SELF_BASE_URL}/api/dingtalk/auth",
+        corp_id=dingtalk.app_key if dingtalk.app_key.startswith("ding") else "",
+    )
+
+
+@app.route("/api/dingtalk/auth", methods=["POST"])
+def dingtalk_auth():
+    """
+    钉钉免登回调
+    前端获取免登 code 后 POST 到此接口
+    后端用 code 换用户信息，然后用 userid 做 ZKH SSO
+    """
+    data = request.get_json(force=True) or {}
+    code = data.get("code", "")
+
+    if not code:
+        return jsonify({"error": "code is required"}), 400
+
+    # 1. 用免登 code 换用户信息
+    userinfo = dingtalk.get_userinfo_by_code(code)
+    if not userinfo:
+        return jsonify({"error": "Failed to get DingTalk user info"}), 500
+
+    userid = userinfo.get("userid", "")
+    name = userinfo.get("name", "")
+
+    if not userid:
+        return jsonify({"error": "No userid in response"}), 500
+
+    logger.info(f"DingTalk user: {userid} ({name})")
+
+    # 2. 获取用户详细信息（手机号、邮箱等）
+    detail = dingtalk.get_user_detail(userid)
+    mobile = detail.get("mobile", "") if detail else ""
+    email = detail.get("email", "") if detail else ""
+
+    # 3. 自动同步用户到震坤行
+    if not client.ensure_user(userid, name, email, mobile):
+        logger.warning(f"Failed to ensure ZKH user: {userid}")
+
+    # 4. SSO 登录震坤行
+    hook_url = f"{SELF_BASE_URL}/api/zkh/checkout"
+    result = client.sso_login(userid, hook_url)
+    if not result:
+        return jsonify({"error": "ZKH SSO login failed"}), 500
+
+    return jsonify({
+        "success": True,
+        "userid": userid,
+        "name": name,
+        "checkin_url": result["checkin_url"],
+        "form": result["checkin_form"],
+    })
 
 
 # ==================== 订单回传（checkOut 回调）====================
@@ -360,6 +546,7 @@ if __name__ == "__main__":
     print("=" * 60)
     print("震坤行 Punch-Out 集成服务")
     print(f"SSO 入口:     GET  {SELF_BASE_URL}/api/zkh/sso?unique_no=xxx")
+    print(f"钉钉免登:     GET  {SELF_BASE_URL}/dingtalk/sso")
     print(f"订单回调:     POST {SELF_BASE_URL}/api/zkh/checkout")
     print(f"待审批列表:   GET  {SELF_BASE_URL}/api/zkh/orders/pending")
     print(f"审批通过:     POST {SELF_BASE_URL}/api/zkh/orders/<id>/approve")
