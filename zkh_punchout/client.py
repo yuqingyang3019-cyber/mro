@@ -35,6 +35,7 @@ class ZKHClient:
         self.password = password
         self._token: Optional[str] = None
         self._token_expires_at: float = 0.0
+        self._last_error: Optional[Dict[str, Any]] = None
 
     # ==================== 工具方法 ====================
 
@@ -82,6 +83,7 @@ class ZKHClient:
             if result.get("success") and result.get("resultCode") == "0000":
                 return result
             else:
+                self._last_error = result
                 logger.warning(f"API fail [{path}]: [{result.get('resultCode')}] {result.get('resultMessage')}")
                 return result
         except urllib.error.HTTPError as e:

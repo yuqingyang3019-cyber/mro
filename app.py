@@ -54,6 +54,14 @@ client = ZKHClient(**ZKH_CONFIG)
 store = OrderApprovalStore()
 dingtalk = DingTalkClient(DINGTALK_CONFIG["app_key"], DINGTALK_CONFIG["app_secret"])
 
+
+def _api_detail(resp: dict) -> str:
+    """提取 API 响应的错误详情"""
+    if not resp:
+        return "无响应"
+    return f"[{resp.get('resultCode', '?')}] {resp.get('resultMessage', '未知错误')}"
+
+
 # ==================== SSO 登录 ====================
 
 SSO_FORM_TEMPLATE = """
@@ -187,6 +195,12 @@ DINGTALK_SSO_TEMPLATE = """
   @keyframes spin { to { transform: rotate(360deg); } }
   .message { color: #666; font-size: 14px; }
   .error { color: #e53e3e; font-size: 13px; margin-top: 12px; display: none; }
+  .steps { text-align: left; margin-top: 16px; font-size: 12px; display: none; }
+  .step { padding: 6px 10px; margin: 4px 0; border-radius: 4px; background: #f8f9fa; border-left: 3px solid #ddd; }
+  .step.ok { border-left-color: #22c55e; }
+  .step.fail { border-left-color: #e53e3e; background: #fff5f5; }
+  .step .label { font-weight: 600; }
+  .step .detail { color: #999; margin-top: 2px; font-family: monospace; }
 </style>
 </head>
 <body>
@@ -195,6 +209,7 @@ DINGTALK_SSO_TEMPLATE = """
     <div class="spinner" id="spinner"></div>
     <p class="message" id="message">正在获取钉钉授权...</p>
     <p class="error" id="error"></p>
+    <div class="steps" id="steps"></div>
   </div>
   <form id="zkhForm" action="" method="post" enctype="multipart/form-data"></form>
 
@@ -203,10 +218,22 @@ DINGTALK_SSO_TEMPLATE = """
     var AUTH_URL = "{{ auth_url }}";
     var CORP_ID = "{{ corp_id }}";
 
-    function showError(msg) {
+    function showError(msg, steps) {
       document.getElementById('spinner').style.display = 'none';
       document.getElementById('message').textContent = msg;
       document.getElementById('message').style.color = '#e53e3e';
+      if (steps && steps.length) {
+        var s = document.getElementById('steps');
+        s.style.display = 'block';
+        s.innerHTML = '<div style="font-weight:600;margin-bottom:6px;">调用链路：</div>';
+        steps.forEach(function(step) {
+          var cls = step.ok ? 'ok' : 'fail';
+          var icon = step.ok ? '&#10003;' : '&#10007;';
+          var detail = step.detail ? '<div class="detail">' + step.detail + '</div>' : '';
+          if (step.api) detail += '<div class="detail">' + step.api + '</div>';
+          s.innerHTML += '<div class="step ' + cls + '"><span class="label">' + icon + ' ' + step.step + '</span> ' + step.msg + detail + '</div>';
+        });
+      }
     }
 
     function showMessage(msg) {
@@ -244,13 +271,18 @@ DINGTALK_SSO_TEMPLATE = """
                   if (resp.success && resp.checkin_form) {
                     submitZKH(resp);
                   } else {
-                    showError(resp.error || 'SSO 登录失败');
+                    showError(resp.error || 'SSO 登录失败', resp.zkh_steps);
                   }
                 } catch (e) {
                   showError('数据解析失败');
                 }
               } else {
-                showError('服务异常，请稍后重试');
+                try {
+                  var resp = JSON.parse(xhr.responseText);
+                  showError(resp.error || '服务异常', resp.zkh_steps);
+                } catch (e) {
+                  showError('服务异常，请稍后重试');
+                }
               }
             };
             xhr.onerror = function () {
@@ -320,21 +352,46 @@ def dingtalk_auth():
     email = detail.get("email", "") if detail else ""
 
     # 3. 自动同步用户到震坤行
-    if not client.ensure_user(userid, name, email, mobile):
-        logger.warning(f"Failed to ensure ZKH user: {userid}")
+    steps = []
+    client.ensure_token()
+    user_result = client.user_sync("query", userid)
+    if user_result and user_result.get("success"):
+        steps.append({"step": "user_sync_query", "ok": True, "msg": "用户已存在"})
+    else:
+        steps.append({"step": "user_sync_query", "ok": False, "msg": "用户不存在，准备创建"})
+        create_result = client.user_sync("insert", userid, nickName=name, email=email, mobile=mobile, roleName="采购员", stateCode=1)
+        if create_result and create_result.get("success"):
+            steps.append({"step": "user_sync_insert", "ok": True, "msg": "用户创建成功"})
+        else:
+            steps.append({"step": "user_sync_insert", "ok": False, "msg": "用户创建失败", "detail": _api_detail(create_result)})
 
-    # 4. SSO 登录震坤行
+    # 4. 获取信任登录标识
+    strust_result = client.get_trusted_login(userid)
+    if not strust_result:
+        # 使用震坤行实际返回的错误信息
+        last_err = client._last_error
+        err_detail = _api_detail(last_err) if last_err else "无响应"
+        return jsonify({
+            "success": False,
+            "error": f"震坤行 trustedLogin 失败: {err_detail}",
+            "userid": userid,
+            "name": name,
+            "zkh_steps": steps + [{"step": "trustedLogin", "ok": False, "msg": "获取信任登录标识失败", "api": "POST /punchout/m2/strustNo", "detail": err_detail}],
+        }), 500
+    steps.append({"step": "trustedLogin", "ok": True, "msg": f"strustNo={strust_result}"})
+
+    # 5. 构建 checkIn 表单
     hook_url = f"{SELF_BASE_URL}/api/zkh/checkout"
-    result = client.sso_login(userid, hook_url)
-    if not result:
-        return jsonify({"error": "ZKH SSO login failed"}), 500
+    form = client.build_checkin_form(userid, strust_result, hook_url)
+    steps.append({"step": "checkIn", "ok": True, "msg": "表单构建完成"})
 
     return jsonify({
         "success": True,
         "userid": userid,
         "name": name,
-        "checkin_url": result["checkin_url"],
-        "form": result["checkin_form"],
+        "checkin_url": f"{client.api_base}/strust/checkIn",
+        "form": form,
+        "zkh_steps": steps,
     })
 
 
