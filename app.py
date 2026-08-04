@@ -618,87 +618,94 @@ def sync_user():
 def approval_callback():
     """
     钉钉审批事件回调接口
-    GET: 事件订阅 URL 验证
-    POST: 接收审批结果推送
+    POST: 接收加密的审批事件（含 URL 验证）
     """
     if request.method == "GET":
-        # 钉钉事件订阅 URL 验证
-        return _handle_callback_verify()
+        return "ok"
 
-    # POST: 处理审批事件
+    # POST: 解析加密数据
     try:
         raw_data = request.get_json(force=True, silent=True) or {}
     except Exception:
         raw_data = {}
 
-    # 钉钉回调可能是加密的 {"encrypt": "..."} 或明文的 JSON
-    if "encrypt" in raw_data:
-        event_data = _decrypt_callback(raw_data.get("encrypt", ""))
-    else:
-        event_data = raw_data
+    encrypt_str = raw_data.get("encrypt", "")
+    if not encrypt_str:
+        logger.warning("Callback missing encrypt field")
+        return jsonify({"errcode": 0, "errmsg": "ok"})
 
+    # 解密
+    event_data = _decrypt_callback(encrypt_str)
     if not event_data:
+        logger.error("Failed to decrypt callback data")
         return jsonify({"errcode": 0, "errmsg": "ok"})
 
-    logger.info(f"Approval callback received: {json.dumps(event_data, ensure_ascii=False)[:500]}")
+    event_type = event_data.get("EventType", "")
+    logger.info(f"Callback event: {event_type}, data: {json.dumps(event_data, ensure_ascii=False)[:500]}")
 
-    success = approval.handle_callback(event_data)
-    if success:
+    # URL 验证事件
+    if event_type == "check_url":
+        return _handle_check_url()
+
+    # 审批事件
+    if event_type == "bpms_instance_change":
+        success = approval.handle_callback(event_data)
         return jsonify({"errcode": 0, "errmsg": "ok"})
-    else:
-        return jsonify({"errcode": 0, "errmsg": "ok"})  # 告诉钉钉已收到，避免重复推送
+
+    # 其他事件：忽略
+    return jsonify({"errcode": 0, "errmsg": "ok"})
 
 
-def _handle_callback_verify():
-    """处理钉钉事件订阅 URL 验证（GET 请求）"""
-    import time as _time
-    import hashlib as _hashlib
-    import base64 as _base64
+def _handle_check_url():
+    """处理钉钉 URL 验证（check_url 事件），返回加密的成功响应"""
+    import base64
+    import hashlib
+    import os as _os
+    from Crypto.Cipher import AES
 
-    signature = request.args.get("signature", "")
-    timestamp = request.args.get("timestamp", "")
-    nonce = request.args.get("nonce", "")
-    echostr = request.args.get("echostr", "")
-
-    token = APPROVAL_CONFIG["callback_token"]
-    if not token:
-        logger.warning("DINGTALK_CALLBACK_TOKEN not configured, returning echostr directly")
-        return echostr
-
-    # 验证签名
-    tmp_arr = sorted([token, timestamp, nonce])
-    tmp_str = "".join(tmp_arr)
-    tmp_sign = _hashlib.sha1(tmp_str.encode()).hexdigest()
-
-    if tmp_sign != signature:
-        logger.warning(f"Callback verify signature mismatch")
-        return "signature error", 403
-
-    # 解密 echostr
     aes_key = APPROVAL_CONFIG["callback_aes_key"]
-    if aes_key:
-        try:
-            from Crypto.Cipher import AES
-            key = _base64.b64decode(aes_key + "=")
-            cipher = AES.new(key, AES.MODE_CBC, key[:16])
-            plain = cipher.decrypt(_base64.b64decode(echostr))
-            # 去除 PKCS7 padding
-            pad = plain[-1]
-            plain = plain[:-pad]
-            # 解析: 16字节随机 + 4字节长度 + 内容 + corpId
-            content_len = int.from_bytes(plain[16:20], "big")
-            content = plain[20:20 + content_len].decode("utf-8")
-            return content
-        except ImportError:
-            logger.warning("pycryptodome not installed, cannot decrypt callback")
-            return echostr
+    token = APPROVAL_CONFIG["callback_token"]
+    corp_id = DINGTALK_CONFIG["corp_id"]
 
-    return echostr
+    if not aes_key or not token:
+        logger.error("Missing callback config for check_url")
+        return "error", 500
+
+    key = base64.b64decode(aes_key + "=")
+
+    # 加密 "success" 响应
+    plaintext = "success".encode("utf-8")
+    random_bytes = _os.urandom(16)
+    msg_len = len(plaintext).to_bytes(4, "big")
+    raw = random_bytes + msg_len + plaintext + corp_id.encode("utf-8")
+
+    # PKCS7 padding
+    block_size = 32
+    padding_len = block_size - len(raw) % block_size
+    raw += bytes([padding_len] * padding_len)
+
+    cipher = AES.new(key, AES.MODE_CBC, key[:16])
+    encrypted = cipher.encrypt(raw)
+    encrypt_b64 = base64.b64encode(encrypted).decode()
+
+    # 计算签名
+    timestamp = str(int(__import__("time").time() * 1000))
+    nonce = hashlib.md5(_os.urandom(16)).hexdigest()[:8]
+    sig_raw = sorted([token, timestamp, nonce, encrypt_b64])
+    signature = hashlib.sha1("".join(sig_raw).encode()).hexdigest()
+
+    return jsonify({
+        "msg_signature": signature,
+        "timeStamp": timestamp,
+        "nonce": nonce,
+        "encrypt": encrypt_b64,
+    })
 
 
 def _decrypt_callback(encrypt_str: str) -> dict:
     """解密钉钉回调加密数据"""
-    import base64 as _base64
+    import base64
+    from Crypto.Cipher import AES
 
     aes_key = APPROVAL_CONFIG["callback_aes_key"]
     if not aes_key:
@@ -706,18 +713,14 @@ def _decrypt_callback(encrypt_str: str) -> dict:
         return {}
 
     try:
-        from Crypto.Cipher import AES
-        key = _base64.b64decode(aes_key + "=")
+        key = base64.b64decode(aes_key + "=")
         cipher = AES.new(key, AES.MODE_CBC, key[:16])
-        plain = cipher.decrypt(_base64.b64decode(encrypt_str))
+        plain = cipher.decrypt(base64.b64decode(encrypt_str))
         pad = plain[-1]
         plain = plain[:-pad]
         content_len = int.from_bytes(plain[16:20], "big")
         content = plain[20:20 + content_len].decode("utf-8")
         return json.loads(content)
-    except ImportError:
-        logger.warning("pycryptodome not installed, cannot decrypt callback")
-        return {}
     except Exception as e:
         logger.error(f"Callback decrypt error: {e}")
         return {}
