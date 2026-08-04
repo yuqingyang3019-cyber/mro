@@ -175,6 +175,7 @@ class OrderApprovalStore:
     def __init__(self):
         self._orders: Dict[str, OrderData] = {}
         self._approvals: Dict[str, ApprovalRecord] = {}
+        self._approval_instances: Dict[str, str] = {}  # order_id -> process_instance_id
 
     def save_order(self, order: OrderData):
         """保存回传订单"""

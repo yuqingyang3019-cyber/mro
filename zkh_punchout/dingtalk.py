@@ -102,3 +102,51 @@ class DingTalkClient:
         if r and r.get("errcode") == 0:
             return r.get("ticket")
         return None
+
+    # ==================== 审批 ====================
+
+    def create_process_instance(
+        self,
+        process_code: str,
+        originator_user_id: str,
+        approver_user_ids: list,
+        form_component_values: list,
+        dept_id: int = -1,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        创建钉钉审批实例
+        :param process_code: 审批模板编号
+        :param originator_user_id: 发起人 userid
+        :param approver_user_ids: 审批人 userid 列表
+        :param form_component_values: 表单字段值列表
+            [{"name": "事项", "value": "xxx"}, ...]
+        :param dept_id: 发起人部门 ID，-1 表示默认
+        :return: {"process_instance_id": "...", ...}
+        """
+        self.ensure_token()
+        url = f"{self.DINGTALK_BASE}/topapi/processinstance/create?access_token={self._token}"
+        payload = {
+            "process_code": process_code,
+            "originator_user_id": originator_user_id,
+            "dept_id": dept_id,
+            "approvers": approver_user_ids[0] if len(approver_user_ids) == 1 else "|".join(approver_user_ids),
+            "form_component_values": form_component_values,
+        }
+        r = self._request("POST", url, payload)
+        if r and r.get("errcode") == 0:
+            logger.info(f"Approval instance created: {r.get('process_instance_id')}")
+            return r
+        return None
+
+    def get_process_instance(self, process_instance_id: str) -> Optional[Dict[str, Any]]:
+        """
+        查询审批实例详情
+        :param process_instance_id: 审批实例 ID
+        :return: 实例详情，包含 status、result、form_component_values 等
+        """
+        self.ensure_token()
+        url = f"{self.DINGTALK_BASE}/topapi/processinstance/get?access_token={self._token}"
+        r = self._request("POST", url, {"process_instance_id": process_instance_id})
+        if r and r.get("errcode") == 0:
+            return r.get("process_instance", {})
+        return None

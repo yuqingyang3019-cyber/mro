@@ -1,3 +1,5 @@
 flask
 gunicorn
 markupsafe
+pycryptodome
+python-dotenv

@@ -20,10 +20,14 @@ import os
 import json
 import logging
 from flask import Flask, request, jsonify, render_template_string
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from zkh_punchout.client import ZKHClient
 from zkh_punchout.order import OrderData, OrderApprovalStore, ApprovalStatus
 from zkh_punchout.dingtalk import DingTalkClient
+from zkh_punchout.approval import ApprovalService
 
 # ==================== 配置 ====================
 
@@ -44,6 +48,13 @@ DINGTALK_CONFIG = {
     "corp_id": os.getenv("DINGTALK_CORP_ID", "ding4f4b796d63d5f483f5bf40eda33b7ba0"),
 }
 
+APPROVAL_CONFIG = {
+    "process_code": os.getenv("DINGTALK_PROCESS_CODE", "PROC-D94EFFF6-FA92-415E-B8F5-1205BE2B5BC4"),
+    "approver_user_id": os.getenv("DINGTALK_APPROVER_USERID", "01432453192526187328"),
+    "callback_token": os.getenv("DINGTALK_CALLBACK_TOKEN", ""),
+    "callback_aes_key": os.getenv("DINGTALK_CALLBACK_AES_KEY", ""),
+}
+
 # ==================== 初始化 ====================
 
 app = Flask(__name__)
@@ -53,6 +64,12 @@ logger = logging.getLogger(__name__)
 client = ZKHClient(**ZKH_CONFIG)
 store = OrderApprovalStore()
 dingtalk = DingTalkClient(DINGTALK_CONFIG["app_key"], DINGTALK_CONFIG["app_secret"])
+approval = ApprovalService(
+    dingtalk=dingtalk,
+    store=store,
+    process_code=APPROVAL_CONFIG["process_code"],
+    approver_user_id=APPROVAL_CONFIG["approver_user_id"],
+)
 
 
 def _api_detail(resp: dict) -> str:
@@ -421,8 +438,12 @@ def checkout_callback():
     order = OrderData.from_checkout(data)
     store.save_order(order)
 
-    # TODO: 触发审批通知（如发送邮件、钉钉消息等）
-    # notify_approvers(order)
+    # 自动创建钉钉审批
+    instance_id = approval.create_approval(order)
+    if instance_id:
+        logger.info(f"Approval instance created for order {order.order_id}: {instance_id}")
+    else:
+        logger.warning(f"Failed to create approval for order {order.order_id}")
 
     return jsonify({
         "success": True,
@@ -589,6 +610,117 @@ def sync_user():
 
     result = client.user_sync(opt, unique_no, **kwargs)
     return jsonify(result or {})
+
+
+# ==================== 审批回调 ====================
+
+@app.route("/api/zkh/approval/callback", methods=["GET", "POST"])
+def approval_callback():
+    """
+    钉钉审批事件回调接口
+    GET: 事件订阅 URL 验证
+    POST: 接收审批结果推送
+    """
+    if request.method == "GET":
+        # 钉钉事件订阅 URL 验证
+        return _handle_callback_verify()
+
+    # POST: 处理审批事件
+    try:
+        raw_data = request.get_json(force=True, silent=True) or {}
+    except Exception:
+        raw_data = {}
+
+    # 钉钉回调可能是加密的 {"encrypt": "..."} 或明文的 JSON
+    if "encrypt" in raw_data:
+        event_data = _decrypt_callback(raw_data.get("encrypt", ""))
+    else:
+        event_data = raw_data
+
+    if not event_data:
+        return jsonify({"errcode": 0, "errmsg": "ok"})
+
+    logger.info(f"Approval callback received: {json.dumps(event_data, ensure_ascii=False)[:500]}")
+
+    success = approval.handle_callback(event_data)
+    if success:
+        return jsonify({"errcode": 0, "errmsg": "ok"})
+    else:
+        return jsonify({"errcode": 0, "errmsg": "ok"})  # 告诉钉钉已收到，避免重复推送
+
+
+def _handle_callback_verify():
+    """处理钉钉事件订阅 URL 验证（GET 请求）"""
+    import time as _time
+    import hashlib as _hashlib
+    import base64 as _base64
+
+    signature = request.args.get("signature", "")
+    timestamp = request.args.get("timestamp", "")
+    nonce = request.args.get("nonce", "")
+    echostr = request.args.get("echostr", "")
+
+    token = APPROVAL_CONFIG["callback_token"]
+    if not token:
+        logger.warning("DINGTALK_CALLBACK_TOKEN not configured, returning echostr directly")
+        return echostr
+
+    # 验证签名
+    tmp_arr = sorted([token, timestamp, nonce])
+    tmp_str = "".join(tmp_arr)
+    tmp_sign = _hashlib.sha1(tmp_str.encode()).hexdigest()
+
+    if tmp_sign != signature:
+        logger.warning(f"Callback verify signature mismatch")
+        return "signature error", 403
+
+    # 解密 echostr
+    aes_key = APPROVAL_CONFIG["callback_aes_key"]
+    if aes_key:
+        try:
+            from Crypto.Cipher import AES
+            key = _base64.b64decode(aes_key + "=")
+            cipher = AES.new(key, AES.MODE_CBC, key[:16])
+            plain = cipher.decrypt(_base64.b64decode(echostr))
+            # 去除 PKCS7 padding
+            pad = plain[-1]
+            plain = plain[:-pad]
+            # 解析: 16字节随机 + 4字节长度 + 内容 + corpId
+            content_len = int.from_bytes(plain[16:20], "big")
+            content = plain[20:20 + content_len].decode("utf-8")
+            return content
+        except ImportError:
+            logger.warning("pycryptodome not installed, cannot decrypt callback")
+            return echostr
+
+    return echostr
+
+
+def _decrypt_callback(encrypt_str: str) -> dict:
+    """解密钉钉回调加密数据"""
+    import base64 as _base64
+
+    aes_key = APPROVAL_CONFIG["callback_aes_key"]
+    if not aes_key:
+        logger.warning("DINGTALK_CALLBACK_AES_KEY not configured, cannot decrypt")
+        return {}
+
+    try:
+        from Crypto.Cipher import AES
+        key = _base64.b64decode(aes_key + "=")
+        cipher = AES.new(key, AES.MODE_CBC, key[:16])
+        plain = cipher.decrypt(_base64.b64decode(encrypt_str))
+        pad = plain[-1]
+        plain = plain[:-pad]
+        content_len = int.from_bytes(plain[16:20], "big")
+        content = plain[20:20 + content_len].decode("utf-8")
+        return json.loads(content)
+    except ImportError:
+        logger.warning("pycryptodome not installed, cannot decrypt callback")
+        return {}
+    except Exception as e:
+        logger.error(f"Callback decrypt error: {e}")
+        return {}
 
 
 # ==================== 健康检查 ====================
