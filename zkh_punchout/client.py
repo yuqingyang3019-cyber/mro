@@ -41,7 +41,7 @@ class ZKHClient:
 
     @staticmethod
     def md5(s: str) -> str:
-        return hashlib.md5(s.encode("utf-8")).hexdigest().upper()
+        return hashlib.md5(s.encode("utf-8")).hexdigest()
 
     def _request(self, path: str, payload: Optional[Dict] = None,
                  need_token: bool = True, token_in_query: bool = False,
