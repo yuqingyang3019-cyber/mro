@@ -268,7 +268,7 @@ DINGTALK_SSO_TEMPLATE = """
               if (xhr.status === 200) {
                 try {
                   var resp = JSON.parse(xhr.responseText);
-                  if (resp.success && resp.checkin_form) {
+                  if (resp.success && resp.form) {
                     submitZKH(resp);
                   } else {
                     showError(resp.error || 'SSO 登录失败', resp.zkh_steps);
