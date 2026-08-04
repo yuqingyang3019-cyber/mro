@@ -730,7 +730,15 @@ def _decrypt_callback(encrypt_str: str) -> dict:
 
 @app.route("/health")
 def health():
-    return jsonify({"status": "ok"})
+    status = {"status": "ok"}
+    try:
+        from Crypto.Cipher import AES
+        status["crypto"] = "ok"
+    except ImportError:
+        status["crypto"] = "missing"
+    status["callback_token"] = "set" if APPROVAL_CONFIG["callback_token"] else "missing"
+    status["callback_aes_key"] = "set" if APPROVAL_CONFIG["callback_aes_key"] else "missing"
+    return jsonify(status)
 
 
 # ==================== 启动 ====================
