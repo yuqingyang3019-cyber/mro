@@ -133,12 +133,10 @@ class ZKHClient:
         sign = self.md5(f"{pin}{unique_no}{ts_ms}")
 
         r = self._request("/strustNo", {
-            "strustReqVo": {
-                "pin": pin,
-                "uniqueNo": unique_no,
-                "time": ts_ms,
-                "sign": sign,
-            }
+            "pin": pin,
+            "uniqueNo": unique_no,
+            "time": ts_ms,
+            "sign": sign,
         }, token_in_query=True)
 
         if r and r.get("success"):
