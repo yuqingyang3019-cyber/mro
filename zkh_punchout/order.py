@@ -237,8 +237,28 @@ class OrderApprovalStore:
         unique_no = data.get("uniqueNo", "")
         strust_no = data.get("strustNo", "")
         app_id = data.get("appId", "")
-        expected = hashlib.md5(
+        actual = data.get("sign", "")
+
+        # 方案1: MD5(pin + uniqueNo + strustNo + appId) 大写
+        expected1 = hashlib.md5(
             f"{pin}{unique_no}{strust_no}{app_id}".encode("utf-8")
         ).hexdigest().upper()
-        actual = data.get("sign", "")
-        return expected == actual
+
+        # 方案2: 小写
+        expected2 = hashlib.md5(
+            f"{pin}{unique_no}{strust_no}{app_id}".encode("utf-8")
+        ).hexdigest()
+
+        # 方案3: strustNo 签名 MD5(pin + uniqueNo + time) 大写
+        expected3 = hashlib.md5(
+            f"{pin}{unique_no}".encode("utf-8")
+        ).hexdigest().upper()
+
+        logger.info(f"Checkout sign verify: pin={pin}, uniqueNo={unique_no}, "
+                    f"strustNo={strust_no}, appId={app_id}")
+        logger.info(f"Checkout sign: actual={actual}")
+        logger.info(f"Checkout sign: expected1(uppercase)={expected1} match={expected1==actual}")
+        logger.info(f"Checkout sign: expected2(lowercase)={expected2} match={expected2==actual}")
+        logger.info(f"Checkout sign: expected3(strustNo style)={expected3} match={expected3==actual}")
+
+        return expected1 == actual
