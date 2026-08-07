@@ -368,6 +368,19 @@ def dingtalk_auth():
     mobile = detail.get("mobile", "") if detail else ""
     email = detail.get("email", "") if detail else ""
 
+    # 2.5. 校验用户是否属于本企业（通过 dept_id_list 判断）
+    # 应用已绑定沃乐 corpId，get_user_detail 返回的 dept_id_list 非空即表示用户属于该企业
+    dept_id_list = detail.get("dept_id_list", []) if detail else []
+    if not dept_id_list:
+        logger.warning(f"User {userid} has no department, not a valid enterprise member")
+        return jsonify({
+            "success": False,
+            "error": "企业校验失败：非本企业员工或用户信息不完整",
+            "userid": userid,
+            "name": name,
+        }), 403
+    logger.info(f"Enterprise check passed: user {userid} in depts {dept_id_list}")
+
     # 3. 自动同步用户到震坤行
     steps = []
     client.ensure_token()
@@ -428,6 +441,7 @@ def checkout_callback():
     """
     data = request.get_json(force=True)
     logger.info(f"Checkout received: orderId={data.get('orderId')}")
+    logger.info(f"Checkout full body: {json.dumps(data, ensure_ascii=False)}")
 
     # 验证签名
     if not store.verify_checkout_sign(data):
