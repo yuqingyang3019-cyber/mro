@@ -886,14 +886,18 @@ DASHBOARD_TEMPLATE = """
     }
 
     function loadDashboard() {
+      var ts = '?t=' + Date.now();
       Promise.all([
-        fetch('/api/zkh/orders/stats').then(function(r) { return r.json(); }),
-        fetch('/api/zkh/orders/all?page=1&size=50').then(function(r) { return r.json(); })
+        fetch('/api/zkh/orders/stats' + ts).then(function(r) { return r.json(); }),
+        fetch('/api/zkh/orders/all?page=1&size=50&_t=' + Date.now()).then(function(r) { return r.json(); })
       ]).then(function(results) {
         renderCards(results[0]);
         renderOrderTable(results[1].orders);
       }).catch(function(err) {
         console.error('Dashboard load error:', err);
+        document.getElementById('orderTable').innerHTML = '<div class="empty" style="color:#e53e3e;">加载失败，请下拉刷新页面重试</div>';
+        var cards = ['val-total', 'val-pending', 'val-amount', 'val-approved'];
+        cards.forEach(function(id) { document.getElementById(id).textContent = '?'; });
       });
     }
 
