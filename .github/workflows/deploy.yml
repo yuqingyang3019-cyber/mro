@@ -7,12 +7,6 @@ on:
 
 permissions:
   contents: read
-  packages: write
-
-env:
-  REGISTRY: ghcr.io
-  API_IMAGE: ghcr.io/${{ github.repository_owner }}/mro-api
-  DEPLOY_PATH: /opt/mro
 
 jobs:
   deploy:
@@ -20,28 +14,24 @@ jobs:
     env:
       DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
       DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
-      DEPLOY_SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
-      GHCR_PULL_TOKEN: ${{ secrets.GHCR_PULL_TOKEN }}
+      DEPLOY_PATH: /opt/mro
     steps:
       - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/build-push-action@v6
-        with:
-          context: .
-          target: backend
-          push: true
-          tags: ${{ env.API_IMAGE }}:${{ github.sha }}
       - uses: webfactory/ssh-agent@v0.9.1
         with:
-          ssh-private-key: ${{ env.DEPLOY_SSH_PRIVATE_KEY }}
+          ssh-private-key: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
       - name: Deploy to ECS
         run: |
           mkdir -p ~/.ssh
           ssh-keyscan -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts
-          printf '%s' "$GHCR_PULL_TOKEN" | ssh "$DEPLOY_USER@$DEPLOY_HOST" "docker login $REGISTRY -u '${{ github.actor }}' --password-stdin"
-          ssh "$DEPLOY_USER@$DEPLOY_HOST" "cd $DEPLOY_PATH && API_IMAGE=$API_IMAGE:${{ github.sha }} docker compose -f compose.production.yml pull mro-api && API_IMAGE=$API_IMAGE:${{ github.sha }} docker compose -f compose.production.yml up -d --no-build mro-api && curl --fail --retry 10 --retry-connrefused http://127.0.0.1:5000/health"
+          rsync -avz --delete \
+            --exclude='.git' \
+            --exclude='.venv' \
+            --exclude='__pycache__' \
+            --exclude='*.pyc' \
+            --exclude='data/' \
+            --exclude='.trae/' \
+            --exclude='.pytest_cache' \
+            --exclude='*.pdf' \
+            ./ "$DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_PATH/"
+          ssh "$DEPLOY_USER@$DEPLOY_HOST" "cd $DEPLOY_PATH && docker compose -f compose.production.yml build mro-api && docker compose -f compose.production.yml up -d mro-api && curl --fail --retry 10 --retry-connrefused http://127.0.0.1:5000/health"
