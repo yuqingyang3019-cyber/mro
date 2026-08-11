@@ -3,3 +3,5 @@ gunicorn
 markupsafe
 pycryptodome
 python-dotenv
+pytest
+pytest-mock

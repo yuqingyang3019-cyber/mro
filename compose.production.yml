@@ -22,8 +22,13 @@ services:
       timeout: 5s
       retries: 3
     mem_limit: 512m
+    volumes:
+      - mro_data:/app/data
 
 networks:
   edge:
     external: true
     name: water-healer-edge
+
+volumes:
+  mro_data:

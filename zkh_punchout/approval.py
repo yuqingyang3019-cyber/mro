@@ -10,6 +10,7 @@ from typing import Optional, Dict, Any
 
 from .dingtalk import DingTalkClient
 from .order import OrderData, OrderApprovalStore, ApprovalStatus
+from .client import ZKHClient
 
 logger = logging.getLogger(__name__)
 
@@ -25,11 +26,14 @@ class ApprovalService:
     """钉钉审批服务"""
 
     def __init__(self, dingtalk: DingTalkClient, store: OrderApprovalStore,
-                 process_code: str, approver_user_id: str):
+                 process_code: str, approver_user_id: str = "",
+                 zkh_client: Optional[ZKHClient] = None):
         self.dingtalk = dingtalk
         self.store = store
+        self.zkh = zkh_client
         self.process_code = process_code
-        self.approver_user_id = approver_user_id
+        # 优先使用 DB 配置，无配置时回退到构造函数参数
+        self._approver_user_id_fallback = approver_user_id
 
     def build_form_values(self, order: OrderData) -> list:
         """将订单数据转换为钉钉审批表单字段值"""
@@ -84,10 +88,18 @@ class ApprovalService:
         """
         form_values = self.build_form_values(order)
 
+        # 下单人作为审批发起人，审批人从 DB 配置读取（回退到环境变量）
+        originator_user_id = order.unique_no
+        approver = self.store.get_config("approver_user_id") or self._approver_user_id_fallback
+
+        if not approver:
+            logger.error(f"No approver configured for order {order.order_id}")
+            return None
+
         result = self.dingtalk.create_process_instance(
             process_code=self.process_code,
-            originator_user_id=self.approver_user_id,
-            approver_user_ids=[self.approver_user_id],
+            originator_user_id=originator_user_id,
+            approver_user_ids=[approver],
             form_component_values=form_values,
         )
 
@@ -99,7 +111,7 @@ class ApprovalService:
         logger.info(f"Approval created: order={order.order_id}, instance={instance_id}")
 
         # 建立订单与审批实例的映射关系
-        self.store._approval_instances[order.order_id] = instance_id
+        self.store.set_approval_instance(order.order_id, instance_id)
         return instance_id
 
     def handle_callback(self, event_data: Dict[str, Any]) -> bool:
@@ -109,7 +121,7 @@ class ApprovalService:
         :return: 是否处理成功
         """
         event_type = event_data.get("EventType", "")
-        if event_type != "bpms_instance_change":
+        if event_type not in ("bpms_instance_change", "bpms_task_change"):
             logger.debug(f"Ignoring event type: {event_type}")
             return True  # 非审批事件，忽略但不报错
 
@@ -131,7 +143,7 @@ class ApprovalService:
         logger.info(f"Approval callback: instance={instance_id}, status={status}, result={result}")
 
         # 查找对应的订单
-        order_id = self._find_order_by_instance(instance_id)
+        order_id = self._find_order_by_instance(instance_id, title)
         if not order_id:
             logger.warning(f"No order found for instance: {instance_id}")
             return False
@@ -147,21 +159,43 @@ class ApprovalService:
 
         return True
 
-    def _find_order_by_instance(self, instance_id: str) -> Optional[str]:
-        """通过审批实例 ID 查找订单 ID"""
-        for oid, iid in self.store._approval_instances.items():
-            if iid == instance_id:
-                return oid
+    def _find_order_by_instance(self, instance_id: str, title: str = "") -> Optional[str]:
+        """通过审批实例 ID 查找订单 ID，DB 中找不到时从标题提取"""
+        # 先查 DB 中的映射
+        order_id = self.store.get_order_by_instance(instance_id)
+        if order_id:
+            return order_id
+
+        # 映射丢失（如旧数据），从标题提取：采购订单审批 - {order_id}
+        if title:
+            prefix = "采购订单审批 - "
+            if title.startswith(prefix):
+                order_id = title[len(prefix):]
+                logger.info(f"Found order_id from title: {order_id}")
+                return order_id
+
         return None
 
     def _on_approved(self, order_id: str, instance_id: str) -> bool:
         """审批通过：确认订单"""
         logger.info(f"Order approved via DingTalk: {order_id}")
-        # 更新本地状态（通过 store 的 approve 方法）
-        record = self.store.approve_order(order_id, "dingtalk", f"PO{order_id}")
+
+        third_order = f"PO{order_id}"
+        record = self.store.approve_order(order_id, "dingtalk", third_order)
         if not record:
             logger.warning(f"Order {order_id} not in pending state")
             return False
+
+        # 调用震坤行 confirmOrder 确认订单
+        if self.zkh:
+            success = self.zkh.confirm_order(order_id, third_order)
+            if not success:
+                logger.error(f"ZKH confirmOrder failed for {order_id}")
+                return False
+            logger.info(f"ZKH order confirmed: {order_id} -> {third_order}")
+        else:
+            logger.warning(f"ZKH client not configured, skipping confirmOrder for {order_id}")
+
         return True
 
     def _on_rejected(self, order_id: str, instance_id: str, reason: str) -> bool:
@@ -171,10 +205,35 @@ class ApprovalService:
         if not record:
             logger.warning(f"Order {order_id} not in pending state")
             return False
+
+        # 调用震坤行 cancel 取消订单
+        if self.zkh:
+            success = self.zkh.cancel_order(order_id)
+            if not success:
+                logger.error(f"ZKH cancelOrder failed for {order_id}")
+                return False
+            logger.info(f"ZKH order cancelled: {order_id}")
+        else:
+            logger.warning(f"ZKH client not configured, skipping cancelOrder for {order_id}")
+
         return True
 
     def _on_cancelled(self, order_id: str, instance_id: str) -> bool:
         """审批撤销"""
         logger.info(f"Approval cancelled: {order_id}")
         record = self.store.reject_order(order_id, "dingtalk", "审批撤销")
-        return record is not None
+        if not record:
+            logger.warning(f"Order {order_id} not in pending state")
+            return False
+
+        # 调用震坤行 cancel 取消订单
+        if self.zkh:
+            success = self.zkh.cancel_order(order_id)
+            if not success:
+                logger.error(f"ZKH cancelOrder failed for {order_id}")
+                return False
+            logger.info(f"ZKH order cancelled: {order_id}")
+        else:
+            logger.warning(f"ZKH client not configured, skipping cancelOrder for {order_id}")
+
+        return True
